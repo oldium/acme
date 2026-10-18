@@ -39,5 +39,5 @@ jobs:
         run: deno publish --dry-run
 
       - name: Publish
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && github.repository == 'lucacasonato/acme'
         run: deno publish
