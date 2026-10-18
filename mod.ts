@@ -575,7 +575,9 @@ export class Client {
       alg = "RS256";
     } else if (
       accountKey.asymmetricKeyType === "ec" &&
-      accountKey.asymmetricKeyDetails?.namedCurve === "p256"
+      // Node and Deno 2.7+ report OpenSSL's name, older Deno "p256".
+      (accountKey.asymmetricKeyDetails?.namedCurve === "p256" ||
+        accountKey.asymmetricKeyDetails?.namedCurve === "prime256v1")
     ) {
       alg = "ES256";
     } else {
