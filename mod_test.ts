@@ -192,3 +192,60 @@ Deno.test("ec + wildcard + ec", () =>
     namedCurve: "P-256",
     hash: "SHA-256",
   }));
+
+Deno.test("waitUntil rejects with the signal's reason", async () => {
+  const client = new Client({
+    directoryUrl: "https://acme.test/dir",
+    accountKey: rsaPrivateKey,
+    accountUrl: "https://acme.test/account/1",
+  });
+  const controller = new AbortController();
+  const reason = new Error("stop");
+  const timer = setTimeout(() => controller.abort(reason), 10);
+  const started = Date.now();
+  let caught: unknown;
+  try {
+    await client.waitUntil(
+      { url: "https://acme.test/order/1", status: "pending" },
+      ["valid"],
+      { signal: controller.signal },
+    );
+  } catch (e) {
+    caught = e;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (caught !== reason) throw new Error(`unexpected rejection: ${caught}`);
+  if (Date.now() - started > 1000) throw new Error("did not stop promptly");
+});
+
+Deno.test("waitUntil with an aborted signal does not poll", async () => {
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (() => {
+    calls++;
+    return Promise.reject(new Error("no network in this test"));
+  }) as typeof fetch;
+  let caught: unknown;
+  try {
+    const client = new Client({
+      directoryUrl: "https://acme.test/dir",
+      accountKey: rsaPrivateKey,
+      accountUrl: "https://acme.test/account/1",
+    });
+    await client.waitUntil(
+      { url: "https://acme.test/order/1", status: "pending" },
+      ["valid"],
+      { signal: AbortSignal.abort("stopped") },
+    );
+  } catch (e) {
+    caught = e;
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  if (caught !== "stopped" || calls !== 0) {
+    throw new Error(`unexpected result: ${caught}, ${calls} requests`);
+  }
+});

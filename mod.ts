@@ -1,6 +1,6 @@
 import { createPublicKey, type KeyObject } from "node:crypto";
 import { base64url, calculateJwkThumbprint, FlattenedSign } from "jose";
-import { parseRetryAfter } from "./util.ts";
+import { delay, parseRetryAfter } from "./util.ts";
 
 interface Directory {
   newNonce: string;
@@ -467,12 +467,19 @@ export class Client {
     return await this.#signedRequest(url, undefined, "kid");
   }
 
+  /**
+   * Poll a resource until its status is one of `statuses`.
+   *
+   * @param options.signal Stops waiting and rejects with the signal's reason,
+   * for example `AbortSignal.timeout(60_000)`.
+   */
   async waitUntil<T extends { url: string; status: string }>(
     resource: T,
     statuses: T["status"][],
+    options: { signal?: AbortSignal } = {},
   ): Promise<T> {
     while (!statuses.includes(resource.status)) {
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await delay(2500, options.signal);
       const url = resource.url;
       resource = await this.#signedRequest<T>(url, undefined, "kid");
       resource.url = url;
