@@ -23,11 +23,11 @@ const rsaPrivateKey =
 const ecPrivateKey =
   generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey;
 
-async function test(
+async function issue(
   accountKey: KeyObject,
   identifiers: Identifier[],
   alg: RsaHashedKeyGenParams | EcKeyGenParams,
-) {
+): Promise<string> {
   const client = new Client({
     directoryUrl: "https://localhost:14000/dir",
     accountKey,
@@ -96,6 +96,13 @@ async function test(
   if (end.getTime() >= certObj.notAfter.getTime()) {
     throw new Error("end is not before notAfter");
   }
+  return certUID;
+}
+
+async function test(
+  ...args: Parameters<typeof issue>
+): Promise<void> {
+  await issue(...args);
 }
 
 function getCertificateUniqueIdentifier(cert: x509.X509Certificate): string {
@@ -149,6 +156,32 @@ async function doAuthz(
   return authz.identifier.value;
 }
 
+Deno.test("supportsRenewalInfo follows the directory", async () => {
+  const realFetch = globalThis.fetch;
+  for (const renewalInfo of [undefined, "https://acme.test/renewal-info"]) {
+    globalThis.fetch = (() =>
+      Promise.resolve(Response.json({
+        newNonce: "https://acme.test/nonce",
+        newAccount: "https://acme.test/account",
+        newOrder: "https://acme.test/order",
+        revokeCert: "https://acme.test/revoke",
+        keyChange: "https://acme.test/key",
+        renewalInfo,
+      }))) as typeof fetch;
+    try {
+      const client = new Client({
+        directoryUrl: "https://acme.test/dir",
+        accountKey: rsaPrivateKey,
+      });
+      if (await client.supportsRenewalInfo() !== (renewalInfo !== undefined)) {
+        throw new Error(`wrong answer for renewalInfo ${renewalInfo}`);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+});
+
 Deno.test("rsa + single + rsa", () =>
   test(rsaPrivateKey, [{ type: "dns", value: "example.com" }], {
     name: "RSASSA-PKCS1-v1_5",
@@ -192,3 +225,84 @@ Deno.test("ec + wildcard + ec", () =>
     namedCurve: "P-256",
     hash: "SHA-256",
   }));
+
+Deno.test("replaces a previous certificate", async () => {
+  const replaced = await issue(
+    rsaPrivateKey,
+    [{ type: "dns", value: "example7.com" }],
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      hash: "SHA-256",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+    },
+  );
+  const client = new Client({
+    directoryUrl: "https://localhost:14000/dir",
+    accountKey: rsaPrivateKey,
+  });
+  await client.createAccount({
+    contact: ["mailto:pebble@example.com"],
+    termsOfServiceAgreed: true,
+  });
+
+  const order = await client.createOrder({
+    identifiers: [{ type: "dns", value: "example7.com" }],
+    replaces: replaced,
+  });
+
+  if (order.replaces !== replaced) {
+    throw new Error(`order does not replace ${replaced}: ${order.replaces}`);
+  }
+});
+
+Deno.test("replaces is not sent without renewalInfo", async () => {
+  const payloads: Record<string, unknown>[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "https://acme.test/dir") {
+      return Promise.resolve(Response.json({
+        newNonce: "https://acme.test/nonce",
+        newAccount: "https://acme.test/account",
+        newOrder: "https://acme.test/order",
+        revokeCert: "https://acme.test/revoke",
+        keyChange: "https://acme.test/key",
+      }));
+    }
+    if (url === "https://acme.test/nonce") {
+      return Promise.resolve(
+        new Response(null, { headers: { "Replay-Nonce": "nonce" } }),
+      );
+    }
+    const jws = JSON.parse(String(init?.body));
+    payloads.push(
+      JSON.parse(new TextDecoder().decode(base64url.decode(jws.payload))),
+    );
+    return Promise.resolve(Response.json({
+      status: "pending",
+      identifiers: [],
+      authorizations: [],
+      finalize: "https://acme.test/finalize",
+    }, { status: 201, headers: { Location: "https://acme.test/order/1" } }));
+  }) as typeof fetch;
+  try {
+    const client = new Client({
+      directoryUrl: "https://acme.test/dir",
+      accountKey: rsaPrivateKey,
+      accountUrl: "https://acme.test/account/1",
+    });
+    await client.createOrder({
+      identifiers: [{ type: "dns", value: "example.com" }],
+      replaces: "aYhba4dGQEHhs3uEe6CuLN4ByNQ.AIdlQyE",
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  if (payloads.length !== 1 || "replaces" in payloads[0]) {
+    throw new Error(
+      `unexpected newOrder payloads: ${JSON.stringify(payloads)}`,
+    );
+  }
+});
