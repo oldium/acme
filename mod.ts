@@ -179,6 +179,8 @@ export interface Order {
    * "valid".
    */
   certificate?: string;
+  /** The ID of the certificate this order replaces, if any. */
+  replaces?: string;
 }
 
 /** An object representing an ACME problem document. */
@@ -419,6 +421,10 @@ export class Client {
       identifiers: newOrder.identifiers,
       notBefore: newOrder.notBefore?.toISOString(),
       notAfter: newOrder.notAfter?.toISOString(),
+      // RFC 9773 says not to send it to servers without renewal information.
+      replaces: directory.renewalInfo === undefined
+        ? undefined
+        : newOrder.replaces,
     };
     return await this.#signedRequest<Order>(url, req, "kid", signal);
   }
@@ -547,6 +553,17 @@ export class Client {
       resource.url = url;
     }
     return resource;
+  }
+
+  /**
+   * Whether the provider serves renewal information (RFC 9773), which
+   * {@link Client.getRenewalInfo} needs.
+   *
+   * @param options Aborts the call ({@link Abortable}).
+   */
+  async supportsRenewalInfo({ signal }: Abortable = {}): Promise<boolean> {
+    const directory = await this.#getDirectory(signal);
+    return directory.renewalInfo !== undefined;
   }
 
   /**
