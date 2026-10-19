@@ -311,7 +311,13 @@ export class Client {
   }
 
   #getDirectory(): Promise<Directory> {
-    if (this.#directory === null) this.#directory = this.#fetchDirectory();
+    if (this.#directory === null) {
+      this.#directory = this.#fetchDirectory().catch((error) => {
+        // Any failure, not only an HTTP error, must let the next call retry.
+        this.#directory = null;
+        throw error;
+      });
+    }
     return this.#directory;
   }
 
@@ -319,7 +325,6 @@ export class Client {
     // TODO: retry loop
     const resp = await fetch(this.#directoryUrl);
     if (!resp.ok) {
-      this.#directory = null;
       throw new HttpError(resp.status, await resp.text());
     }
     return await resp.json();

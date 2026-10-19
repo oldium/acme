@@ -23,6 +23,60 @@ const rsaPrivateKey =
 const ecPrivateKey =
   generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey;
 
+Deno.test("a failed directory fetch is retried by the next call", async () => {
+  const failures = [
+    () => Promise.reject(new TypeError("network down")),
+    () => Promise.resolve(new Response("not json")),
+  ];
+  const realFetch = globalThis.fetch;
+  for (const failure of failures) {
+    let directoryFetches = 0;
+    globalThis.fetch = ((input: string | URL | Request) => {
+      if (String(input) !== "https://acme.test/dir") {
+        return Promise.resolve(Response.json({
+          suggestedWindow: {
+            start: "2026-01-01T00:00:00Z",
+            end: "2026-01-02T00:00:00Z",
+          },
+        }));
+      }
+      if (directoryFetches++ === 0) {
+        return failure();
+      }
+      return Promise.resolve(Response.json({
+        newNonce: "https://acme.test/nonce",
+        newAccount: "https://acme.test/account",
+        newOrder: "https://acme.test/order",
+        revokeCert: "https://acme.test/revoke",
+        keyChange: "https://acme.test/key",
+        renewalInfo: "https://acme.test/renewal-info",
+      }));
+    }) as typeof fetch;
+    try {
+      const client = new Client({
+        directoryUrl: "https://acme.test/dir",
+        accountKey: rsaPrivateKey,
+      });
+      const first = await client.getRenewalInfo("id").then(
+        () => null,
+        (error) => error,
+      );
+      if (first === null) {
+        throw new Error("the first call should fail");
+      }
+      const info = await client.getRenewalInfo("id");
+      if (
+        directoryFetches !== 2 ||
+        info.suggestedWindow.start !== "2026-01-01T00:00:00Z"
+      ) {
+        throw new Error(`directory fetched ${directoryFetches} times`);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+});
+
 async function test(
   accountKey: KeyObject,
   identifiers: Identifier[],
