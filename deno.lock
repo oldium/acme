@@ -137,7 +137,7 @@
     "@types/node@22.12.0": {
       "integrity": "sha512-Fll2FZ1riMjNmlmJOdAyY5pUbkftXslB5DgEzlIuNaiWhXd00FhWxVC/r4yV/4wBb9JfImTu+jiSvXTkJ7F/gA==",
       "dependencies": [
-        "undici-types@6.20.0"
+        "undici-types"
       ]
     },
     "asn1js@3.0.5": {
@@ -178,9 +178,6 @@
         "tslib@1.14.1"
       ]
     },
-    "undici-types@6.19.8": {
-      "integrity": "sha512-ve2KP6f/JnbPBFyobGHuerC9g1FYGn/F8n1LWTwNxCEzd6IfqTwUQcNXgEtmmQ6DlRrC1hrSrBnCZPokRrDHjw=="
-    },
     "undici-types@6.20.0": {
       "integrity": "sha512-Ny6QZ2Nju20vw1SRHe3d9jVu6gJ+4e3+MMpqu7pqE5HT6WsTSlce++GQmK5UXS8mzV8DSYHrQH+Xrf2jVcuKNg=="
     }
@@ -189,6 +186,13 @@
     "dependencies": [
       "npm:@peculiar/x509@^1.12.3",
       "npm:jose@^6.0.8"
-    ]
+    ],
+    "packageJson": {
+      "dependencies": [
+        "npm:@types/node@24",
+        "npm:jose@^6.0.8",
+        "npm:typescript@^6.0.2"
+      ]
+    }
   }
 }

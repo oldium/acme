@@ -5,5 +5,6 @@
   "imports": {
     "@peculiar/x509": "npm:@peculiar/x509@^1.12.3",
     "jose": "npm:jose@^6.0.8"
-  }
+  },
+  "nodeModulesDir": "none"
 }
