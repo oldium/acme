@@ -10,6 +10,7 @@ interface Directory {
   keyChange: string;
   newAuthz?: string;
   renewalInfo?: string;
+  meta?: { profiles?: Record<string, string> };
 }
 
 /**
@@ -132,6 +133,11 @@ export interface NewOrderRequest {
    * this feature.
    */
   replaces?: string;
+  /**
+   * The name of the profile to issue the certificate under, one of
+   * {@link Client.profiles}. Unset or `null` lets the provider choose.
+   */
+  profile?: string | null;
 }
 
 /** An object representing an ACME identifier. */
@@ -181,6 +187,8 @@ export interface Order {
   certificate?: string;
   /** The ID of the certificate this order replaces, if any. */
   replaces?: string;
+  /** The profile the certificate is issued under, if the provider has any. */
+  profile?: string;
 }
 
 /** An object representing an ACME problem document. */
@@ -425,8 +433,23 @@ export class Client {
       replaces: directory.renewalInfo === undefined
         ? undefined
         : newOrder.replaces,
+      profile: newOrder.profile ?? undefined,
     };
     return await this.#signedRequest<Order>(url, req, "kid", signal);
+  }
+
+  /**
+   * Get the certificate profiles the provider offers, each name mapped to a
+   * description of it (usually a URL).
+   *
+   * @param options Aborts the call ({@link Abortable}).
+   * @returns The profiles, or `null` if the provider offers none.
+   */
+  async profiles(
+    { signal }: Abortable = {},
+  ): Promise<Record<string, string> | null> {
+    const directory = await this.#getDirectory(signal);
+    return directory.meta?.profiles ?? null;
   }
 
   /**

@@ -361,6 +361,117 @@ Deno.test("replaces is not sent without renewalInfo", async () => {
   }
 });
 
+Deno.test("profiles returns the directory's profiles, or null", async () => {
+  const profiles = { classic: "https://acme.test/docs#classic" };
+  const cases: { meta?: unknown; expected: Record<string, string> | null }[] = [
+    { expected: null },
+    { meta: {}, expected: null },
+    { meta: { profiles }, expected: profiles },
+  ];
+  const realFetch = globalThis.fetch;
+  for (const { meta, expected } of cases) {
+    globalThis.fetch = (() =>
+      Promise.resolve(Response.json({
+        newNonce: "https://acme.test/nonce",
+        newAccount: "https://acme.test/account",
+        newOrder: "https://acme.test/order",
+        revokeCert: "https://acme.test/revoke",
+        keyChange: "https://acme.test/key",
+        meta,
+      }))) as typeof fetch;
+    try {
+      const client = new Client({
+        directoryUrl: "https://acme.test/dir",
+        accountKey: rsaPrivateKey,
+      });
+      const actual = await client.profiles();
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        throw new Error(
+          `profiles ${JSON.stringify(actual)} for meta ${JSON.stringify(meta)}`,
+        );
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+});
+
+Deno.test("profile is sent only when given", async () => {
+  const payloads: Record<string, unknown>[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "https://acme.test/dir") {
+      return Promise.resolve(Response.json({
+        newNonce: "https://acme.test/nonce",
+        newAccount: "https://acme.test/account",
+        newOrder: "https://acme.test/order",
+        revokeCert: "https://acme.test/revoke",
+        keyChange: "https://acme.test/key",
+      }));
+    }
+    if (url === "https://acme.test/nonce") {
+      return Promise.resolve(
+        new Response(null, { headers: { "Replay-Nonce": "nonce" } }),
+      );
+    }
+    const jws = JSON.parse(String(init?.body));
+    payloads.push(
+      JSON.parse(new TextDecoder().decode(base64url.decode(jws.payload))),
+    );
+    return Promise.resolve(Response.json({
+      status: "pending",
+      identifiers: [],
+      authorizations: [],
+      finalize: "https://acme.test/finalize",
+    }, { status: 201, headers: { Location: "https://acme.test/order/1" } }));
+  }) as typeof fetch;
+  try {
+    const client = new Client({
+      directoryUrl: "https://acme.test/dir",
+      accountKey: rsaPrivateKey,
+      accountUrl: "https://acme.test/account/1",
+    });
+    for (const profile of [undefined, null, "shortlived"]) {
+      await client.createOrder({
+        identifiers: [{ type: "dns", value: "example.com" }],
+        profile,
+      });
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  const sent = payloads.map((payload) =>
+    "profile" in payload ? payload.profile : "(none)"
+  );
+  if (
+    JSON.stringify(sent) !== JSON.stringify(["(none)", "(none)", "shortlived"])
+  ) {
+    throw new Error(`unexpected profiles sent: ${JSON.stringify(sent)}`);
+  }
+});
+
+Deno.test("orders a certificate with a profile", async () => {
+  const client = new Client({
+    directoryUrl: "https://localhost:14000/dir",
+    accountKey: rsaPrivateKey,
+  });
+  await client.createAccount({
+    contact: ["mailto:pebble@example.com"],
+    termsOfServiceAgreed: true,
+  });
+
+  const order = await client.createOrder({
+    identifiers: [{ type: "dns", value: "example8.com" }],
+    profile: "shortlived",
+  });
+
+  if (order.profile !== "shortlived") {
+    throw new Error(`order has profile ${order.profile}`);
+  }
+});
+
 Deno.test("waitUntil rejects with the signal's reason", async () => {
   const client = new Client({
     directoryUrl: "https://acme.test/dir",
@@ -556,6 +667,7 @@ const ABORTABLE_CALLS: [
     "supportsRenewalInfo",
     (client, signal) => client.supportsRenewalInfo({ signal }),
   ],
+  ["profiles", (client, signal) => client.profiles({ signal })],
   [
     "waitUntil",
     (client, signal) =>

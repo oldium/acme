@@ -11,6 +11,8 @@ A modern and fully-featured ACME client implementation for Deno and Node.js.
 - Compatible with Let's Encrypt and other ACME providers
 - Support for wildcard certificates
 - Support for certificate renewal information
+- Support for
+  [certificate profiles](https://datatracker.ietf.org/doc/draft-ietf-acme-profiles/)
 - Automatic retries mechanism
 - Every request and wait can be stopped with an `AbortSignal`
 - Clean and type-safe API
