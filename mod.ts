@@ -1,6 +1,6 @@
 import { createPublicKey, type KeyObject } from "node:crypto";
 import { base64url, calculateJwkThumbprint, FlattenedSign } from "jose";
-import { parseRetryAfter } from "./util.ts";
+import { delay, parseRetryAfter, SharedFetchRequest } from "./util.ts";
 
 interface Directory {
   newNonce: string;
@@ -272,9 +272,19 @@ export interface RenewalInfo {
 }
 
 /** The ACME client. */
+/** Options of a call that sends requests or waits. */
+export interface Abortable {
+  /**
+   * Aborts the call's requests and waits, which then reject as `fetch` does,
+   * for example on `AbortSignal.timeout(60_000)`. Concurrent calls share the
+   * directory request, aborted with an `AbortError` once all of them abort.
+   */
+  signal?: AbortSignal;
+}
+
 export class Client {
   #directoryUrl: string;
-  #directory: Promise<Directory> | null;
+  #directory: SharedFetchRequest<Directory> | null;
   #accountKey: KeyObject;
   #accountUrl: string | null = null;
   #autoCreateAccountOptions:
@@ -310,20 +320,23 @@ export class Client {
     this.#autoCreateAccountOptions = options.autoCreateAccountOptions || null;
   }
 
-  #getDirectory(): Promise<Directory> {
-    if (this.#directory === null) {
-      this.#directory = this.#fetchDirectory().catch((error) => {
-        // Any failure, not only an HTTP error, must let the next call retry.
-        this.#directory = null;
-        throw error;
-      });
+  #getDirectory(signal: AbortSignal | undefined): Promise<Directory> {
+    if (this.#directory === null || this.#directory.aborted) {
+      const directory = new SharedFetchRequest((signal) =>
+        this.#fetchDirectory(signal).catch((error) => {
+          // Any failure, not only an HTTP error, must let the next call retry.
+          if (this.#directory === directory) this.#directory = null;
+          throw error;
+        })
+      );
+      this.#directory = directory;
     }
-    return this.#directory;
+    return this.#directory.get(signal);
   }
 
-  async #fetchDirectory(): Promise<Directory> {
+  async #fetchDirectory(signal: AbortSignal): Promise<Directory> {
     // TODO: retry loop
-    const resp = await fetch(this.#directoryUrl);
+    const resp = await fetch(this.#directoryUrl, { signal });
     if (!resp.ok) {
       throw new HttpError(resp.status, await resp.text());
     }
@@ -335,16 +348,20 @@ export class Client {
    * account already exists with the key, it will be returned.
    *
    * @param options The options for creating the account.
+   * @param abortable Aborts the call ({@link Abortable}).
    */
-  async createAccount(options: CreateAccountRequest): Promise<Account> {
-    const directory = await this.#getDirectory();
+  async createAccount(
+    options: CreateAccountRequest,
+    { signal }: Abortable = {},
+  ): Promise<Account> {
+    const directory = await this.#getDirectory(signal);
     const url = directory.newAccount;
     const req = {
       contact: options.contact,
       termsOfServiceAgreed: options.termsOfServiceAgreed,
       onlyReturnExisting: options.onlyReturnExisting,
     };
-    return await this.#signedRequest<Account>(url, req, "jwk");
+    return await this.#signedRequest<Account>(url, req, "jwk", signal);
   }
 
   /**
@@ -352,9 +369,13 @@ export class Client {
    * account.
    *
    * @param options The options for updating the account.
+   * @param abortable Aborts the call ({@link Abortable}).
    * @returns The updated account object.
    */
-  async updateAccount(options: UpdateAccountRequest): Promise<Account> {
+  async updateAccount(
+    options: UpdateAccountRequest,
+    { signal }: Abortable = {},
+  ): Promise<Account> {
     const req = {
       status: options.status,
       contact: options.contact,
@@ -364,10 +385,17 @@ export class Client {
         onlyReturnExisting: this.#autoCreateAccountOptions === null,
         ...this.#autoCreateAccountOptions,
       };
-      const account = await this.createAccount(createAccountOptions);
+      const account = await this.createAccount(createAccountOptions, {
+        signal,
+      });
       this.#accountUrl = account.url;
     }
-    return await this.#signedRequest<Account>(this.#accountUrl, req, "kid");
+    return await this.#signedRequest<Account>(
+      this.#accountUrl,
+      req,
+      "kid",
+      signal,
+    );
   }
 
   /**
@@ -378,27 +406,37 @@ export class Client {
    * finalized.
    *
    * @param newOrder The options for creating the order.
+   * @param options Aborts the call ({@link Abortable}).
    * @returns The order object.
    */
-  async createOrder(newOrder: NewOrderRequest): Promise<Order> {
-    const directory = await this.#getDirectory();
+  async createOrder(
+    newOrder: NewOrderRequest,
+    { signal }: Abortable = {},
+  ): Promise<Order> {
+    const directory = await this.#getDirectory(signal);
     const url = directory.newOrder;
     const req = {
       identifiers: newOrder.identifiers,
       notBefore: newOrder.notBefore?.toISOString(),
       notAfter: newOrder.notAfter?.toISOString(),
     };
-    return await this.#signedRequest<Order>(url, req, "kid");
+    return await this.#signedRequest<Order>(url, req, "kid", signal);
   }
 
   /**
    * Get the current state of an order using its URL ({@link Order.url}).
    *
    * @param url The URL of the order.
+   * @param options Aborts the call ({@link Abortable}).
    * @returns The current order object.
    */
-  async getOrder(url: string): Promise<Order> {
-    const order = await this.#signedRequest<Order>(url, undefined, "kid");
+  async getOrder(url: string, { signal }: Abortable = {}): Promise<Order> {
+    const order = await this.#signedRequest<Order>(
+      url,
+      undefined,
+      "kid",
+      signal,
+    );
     order.url = url;
     return order;
   }
@@ -411,14 +449,21 @@ export class Client {
    *
    * @param url The finalization URL from the order object ({@link Order.finalize}).
    * @param csr The DER-encoded PKCS#10 CSR.
+   * @param options Aborts the call ({@link Abortable}).
    * @returns The current order object.
    */
   async finalizeOrder(
     order: { url: Order["url"]; finalize: Order["finalize"] },
     csr: Uint8Array,
+    { signal }: Abortable = {},
   ): Promise<Order> {
     const req = { csr: base64url.encode(csr) };
-    const res = await this.#signedRequest<Order>(order.finalize, req, "kid");
+    const res = await this.#signedRequest<Order>(
+      order.finalize,
+      req,
+      "kid",
+      signal,
+    );
     res.url = order.url;
     return res;
   }
@@ -427,13 +472,18 @@ export class Client {
    * Get the current state of an authorization using its URL ({@link Authorization.url}).
    *
    * @param url The URL of the authorization.
+   * @param options Aborts the call ({@link Abortable}).
    * @returns The current authorization object.
    */
-  async getAuthorization(url: string): Promise<Authorization> {
+  async getAuthorization(
+    url: string,
+    { signal }: Abortable = {},
+  ): Promise<Authorization> {
     const auth = await this.#signedRequest<Authorization>(
       url,
       undefined,
       "kid",
+      signal,
     );
     auth.url = url;
     return auth;
@@ -458,43 +508,62 @@ export class Client {
    * validated. This should be called after the challenge is set up.
    *
    * @param url The URL of the challenge ({@link Challenge.url}) from the authorization object ({@link Authorization.challenges}).
+   * @param options Aborts the call ({@link Abortable}).
    */
-  async completeChallenge(url: string): Promise<Challenge> {
-    return await this.#signedRequest(url, {}, "kid");
+  async completeChallenge(
+    url: string,
+    { signal }: Abortable = {},
+  ): Promise<Challenge> {
+    return await this.#signedRequest(url, {}, "kid", signal);
   }
 
   /**
    * Get the certificate for an order from the certificate URL ({@link Order.certificate}).
    *
    * @param url The URL of the certificate.
+   * @param options Aborts the call ({@link Abortable}).
    */
-  async getCertificate(url: string): Promise<string> {
-    return await this.#signedRequest(url, undefined, "kid");
+  async getCertificate(
+    url: string,
+    { signal }: Abortable = {},
+  ): Promise<string> {
+    return await this.#signedRequest(url, undefined, "kid", signal);
   }
 
+  /**
+   * Poll a resource until its status is one of `statuses`.
+   *
+   * @param options Aborts the polling ({@link Abortable}).
+   */
   async waitUntil<T extends { url: string; status: string }>(
     resource: T,
     statuses: T["status"][],
+    { signal }: Abortable = {},
   ): Promise<T> {
     while (!statuses.includes(resource.status)) {
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await delay(2500, signal);
       const url = resource.url;
-      resource = await this.#signedRequest<T>(url, undefined, "kid");
+      resource = await this.#signedRequest<T>(url, undefined, "kid", signal);
       resource.url = url;
     }
     return resource;
   }
 
-  /** Get the renewal information for a certificate. */
+  /**
+   * Get the renewal information for a certificate.
+   *
+   * @param options Aborts the call ({@link Abortable}).
+   */
   async getRenewalInfo(
     certificateUniqueIdentity: string,
+    { signal }: Abortable = {},
   ): Promise<RenewalInfo> {
-    const directory = await this.#getDirectory();
+    const directory = await this.#getDirectory(signal);
     if (directory.renewalInfo === undefined) {
       throw new Error("Provider does not support renewal information");
     }
     const url = directory.renewalInfo + "/" + certificateUniqueIdentity;
-    const resp = await fetch(url);
+    const resp = await fetch(url, { signal });
     if (resp.ok) {
       const contentType = resp.headers.get("Content-Type");
       if (contentType?.startsWith("application/json")) {
@@ -544,11 +613,12 @@ export class Client {
     url: string,
     body: unknown,
     mode: "kid" | "jwk",
+    signal: AbortSignal | undefined,
   ): Promise<T> {
     let retry = 0;
     while (true) {
       try {
-        return await this.#signedRequestInner(url, body, mode);
+        return await this.#signedRequestInner(url, body, mode, signal);
       } catch (e) {
         if (
           e instanceof AcmeError &&
@@ -569,8 +639,9 @@ export class Client {
     url: string,
     body: unknown,
     mode: "kid" | "jwk",
+    signal: AbortSignal | undefined,
   ): Promise<T> {
-    const nonce = await this.#getNonce();
+    const nonce = await this.#getNonce(signal);
     const accountKey = this.#accountKey;
     if (!accountKey) throw new Error("No account key");
     const payload = body === undefined ? "" : JSON.stringify(body);
@@ -600,7 +671,9 @@ export class Client {
           onlyReturnExisting: this.#autoCreateAccountOptions === null,
           ...this.#autoCreateAccountOptions,
         };
-        const account = await this.createAccount(createAccountOptions);
+        const account = await this.createAccount(createAccountOptions, {
+          signal,
+        });
         this.#accountUrl = account.url;
       }
       kid = this.#accountUrl;
@@ -624,6 +697,7 @@ export class Client {
         "Content-Type": "application/jose+json",
       },
       body: JSON.stringify(jws),
+      signal,
     });
     const newNonce = resp.headers.get("Replay-Nonce");
     if (newNonce) this.#nonce = newNonce;
@@ -661,11 +735,11 @@ export class Client {
     }
   }
 
-  async #getNonce(): Promise<string> {
+  async #getNonce(signal: AbortSignal | undefined): Promise<string> {
     if (this.#nonce === null) {
-      const directory = await this.#getDirectory();
+      const directory = await this.#getDirectory(signal);
       const url = directory.newNonce;
-      const resp = await fetch(url, { method: "HEAD" });
+      const resp = await fetch(url, { method: "HEAD", signal });
       const nonce = resp.headers.get("Replay-Nonce");
       if (!nonce) throw new Error("No Replay-Nonce header");
       await resp.body?.cancel();

@@ -1,5 +1,9 @@
-import { parseRetryAfter } from "./util.ts";
-import { assertEquals } from "@std/assert";
+import { parseRetryAfter, SharedFetchRequest } from "./util.ts";
+import {
+  assertEquals,
+  assertInstanceOf,
+  assertStrictEquals,
+} from "@std/assert";
 
 Deno.test("parseRetryAfter", async (t) => {
   // RFC 7231: Delay in seconds format
@@ -144,4 +148,53 @@ Deno.test("parseRetryAfter", async (t) => {
     const expected = new Date(pastDate);
     assertEquals(retryAfter?.getTime(), expected.getTime());
   });
+});
+
+// Settles when told to or, like fetch, rejects on abort with `abortError`.
+function fakeFetch(abortError: unknown = new Error("aborted")) {
+  const fake = {
+    fetches: 0,
+    signal: undefined as AbortSignal | undefined,
+    resolve: (_value: string) => {},
+    fetch: (signal: AbortSignal) => {
+      fake.fetches++;
+      fake.signal = signal;
+      return new Promise<string>((resolve, reject) => {
+        fake.resolve = resolve;
+        signal.addEventListener("abort", () => reject(abortError), {
+          once: true,
+        });
+      });
+    },
+  };
+  return fake;
+}
+
+Deno.test("SharedFetchRequest keeps a value that arrived before the abort", async () => {
+  const fake = fakeFetch();
+  const request = new SharedFetchRequest(fake.fetch);
+  const controller = new AbortController();
+  const call = request.get(controller.signal);
+  fake.resolve("value");
+  controller.abort();
+  assertEquals(await call, "value");
+  assertEquals(await request.get(), "value");
+  assertEquals(fake.fetches, 1);
+});
+
+Deno.test("SharedFetchRequest gives every call the fetch's own error", async () => {
+  const abortError = new Error("fetch aborted");
+  const fake = fakeFetch(abortError);
+  const request = new SharedFetchRequest(fake.fetch);
+  const first = new AbortController();
+  const second = new AbortController();
+  const calls = [first, second].map((controller) =>
+    request.get(controller.signal).catch((error) => error)
+  );
+  first.abort("first");
+  assertEquals(fake.signal?.aborted, false);
+  second.abort("second");
+  assertInstanceOf(fake.signal?.reason, DOMException);
+  assertEquals(fake.signal?.reason.name, "AbortError");
+  for (const call of calls) assertStrictEquals(await call, abortError);
 });

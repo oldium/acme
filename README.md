@@ -12,6 +12,7 @@ A modern and fully-featured ACME client implementation for Deno and Node.js.
 - Support for wildcard certificates
 - Support for certificate renewal information
 - Automatic retries mechanism
+- Every request and wait can be stopped with an `AbortSignal`
 - Clean and type-safe API
 
 ## Basic Usage
